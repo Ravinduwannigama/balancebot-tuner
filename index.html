@@ -32,6 +32,8 @@
   .desc{font-size:12px; color:var(--muted); margin-top:4px;}
   canvas{width:100%; display:block; background:var(--panel2); border-radius:8px;}
   .chart-title{font-size:12px; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between;}
+  .controls-row{display:flex; gap:10px; margin-bottom:10px;}
+  .controls-row button{flex:1;}
   @media (prefers-color-scheme: light){
     :root{ --bg:#f4f6f9; --panel:#ffffff; --panel2:#f0f2f6; --border:#e2e6ec; --text:#101722; --muted:#5b6778; }
   }
@@ -86,6 +88,10 @@
   </div>
 
   <div class="card">
+    <div class="controls-row">
+      <button id="stopBtn" style="background:var(--danger);">STOP MOTORS</button>
+      <button id="resetBtn" style="background:var(--warn);">Reset Integral</button>
+    </div>
     <div id="statusText" class="desc">Not connected. Tap Connect, then choose "BalanceBot".</div>
   </div>
 
@@ -96,14 +102,19 @@
   const CHAR_KI_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
   const CHAR_KD_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
   const CHAR_STATUS_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab";
+  const CHAR_STOP_UUID   = "beb5483e-36e1-4688-b7f5-ea07361b26ac";
+  const CHAR_RESET_UUID  = "beb5483e-36e1-4688-b7f5-ea07361b26ad";
 
   const dot = document.getElementById('dot');
   const connectBtn = document.getElementById('connectBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const resetBtn = document.getElementById('resetBtn');
   const statusText = document.getElementById('statusText');
   const thetaVal = document.getElementById('thetaVal');
   const uVal = document.getElementById('uVal');
 
-  let device, server, kpChar, kiChar, kdChar, statusChar;
+  let device, server, kpChar, kiChar, kdChar, statusChar, stopChar, resetChar;
+  let isStopped = false;
 
   function setStatus(msg, connected){
     statusText.textContent = msg;
@@ -146,6 +157,26 @@
       }
     }catch(e){ /* some library versions don't support reading a write characteristic; safe to ignore */ }
   }
+
+  stopBtn.addEventListener('click', async ()=>{
+    if (!stopChar) return;
+    isStopped = !isStopped;
+    const enc = new TextEncoder();
+    try{
+      await stopChar.writeValueWithResponse(enc.encode(isStopped ? '1' : '0'));
+      stopBtn.textContent = isStopped ? 'RESUME MOTORS' : 'STOP MOTORS';
+      stopBtn.style.background = isStopped ? 'var(--accent2)' : 'var(--danger)';
+    }catch(e){ setStatus('Stop write failed: '+e, true); }
+  });
+
+  resetBtn.addEventListener('click', async ()=>{
+    if (!resetChar) return;
+    const enc = new TextEncoder();
+    try{
+      await resetChar.writeValueWithResponse(enc.encode('1'));
+      setStatus('Integral error reset.', true);
+    }catch(e){ setStatus('Reset write failed: '+e, true); }
+  });
 
   function makeChart(canvasId){
     const canvas = document.getElementById(canvasId);
@@ -270,7 +301,12 @@
         filters: [{ name: 'BalanceBot' }],
         optionalServices: [SERVICE_UUID]
       });
-      device.addEventListener('gattserverdisconnected', ()=> setStatus('Disconnected.', false));
+      device.addEventListener('gattserverdisconnected', ()=>{
+        setStatus('Disconnected.', false);
+        isStopped = false;
+        stopBtn.textContent = 'STOP MOTORS';
+        stopBtn.style.background = 'var(--danger)';
+      });
 
       setStatus('Connecting...', false);
       server = await device.gatt.connect();
@@ -280,6 +316,8 @@
       kiChar = await service.getCharacteristic(CHAR_KI_UUID);
       kdChar = await service.getCharacteristic(CHAR_KD_UUID);
       statusChar = await service.getCharacteristic(CHAR_STATUS_UUID);
+      stopChar = await service.getCharacteristic(CHAR_STOP_UUID);
+      resetChar = await service.getCharacteristic(CHAR_RESET_UUID);
 
       await readGainInto(kpChar, 'kpSlider', 'kpNum');
       await readGainInto(kiChar, 'kiSlider', 'kiNum');
