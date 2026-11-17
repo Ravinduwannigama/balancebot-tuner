@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BalanceBot Tuner</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#131924; --panel2:#0f141c; --border:#1f2937;
+    --text:#e5e9f0; --muted:#8b96a5; --accent:#4da3ff; --accent2:#22c55e;
+    --danger:#ef4444; --warn:#f59e0b;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding:16px; padding-top:calc(16px + env(safe-area-inset-top,0px)); padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));}
+  h1{font-size:18px; margin:0;}
+  .topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px;}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--danger); display:inline-block; margin-right:8px;}
+  .dot.on{background:var(--accent2);}
+  button{background:var(--accent); color:#fff; border:none; border-radius:8px; padding:10px 16px; font-size:14px; font-weight:600;}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:14px;}
+  .readouts{display:flex; gap:12px;}
+  .readout{flex:1; text-align:center;}
+  .readout .val{font-size:28px; font-weight:700;}
+  .readout .lbl{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;}
+  .gain{margin-bottom:18px;}
+  .gain:last-child{margin-bottom:0;}
+  .gain-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;}
+  .gain-head label{font-weight:600; font-size:14px;}
+  .gain-row{display:flex; align-items:center; gap:10px;}
+  input[type=range]{flex:1; accent-color:var(--accent);}
+  input[type=number]{width:80px; background:var(--panel2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px; font-size:14px;}
+  .desc{font-size:12px; color:var(--muted); margin-top:4px;}
+  canvas{width:100%; display:block; background:var(--panel2); border-radius:8px;}
+  .chart-title{font-size:12px; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between;}
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f4f6f9; --panel:#ffffff; --panel2:#f0f2f6; --border:#e2e6ec; --text:#101722; --muted:#5b6778; }
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1><span class="dot" id="dot"></span>BalanceBot Tuner</h1>
+    <button id="connectBtn">Connect</button>
+  </div>
+
+  <div class="card readouts">
+    <div class="readout"><div class="val" id="thetaVal">--</div><div class="lbl">Tilt (deg)</div></div>
+    <div class="readout"><div class="val" id="uVal">--</div><div class="lbl">u (motor)</div></div>
+  </div>
+
+  <div class="card">
+    <div class="chart-title"><span>Tilt vs target (0°)</span><span>last 10s</span></div>
+    <canvas id="thetaChart" height="140"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="chart-title"><span>Motor command u</span><span>-1 to +1</span></div>
+    <canvas id="uChart" height="140"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="gain">
+      <div class="gain-head"><label>Kp</label></div>
+      <div class="gain-row">
+        <input type="range" id="kpSlider" min="0" max="5" step="0.01" value="0">
+        <input type="number" id="kpNum" min="0" max="5" step="0.01" value="0">
+      </div>
+      <div class="desc">Reacts to the current tilt. Raise until the robot fights falling and starts to oscillate.</div>
+    </div>
+    <div class="gain">
+      <div class="gain-head"><label>Ki</label></div>
+      <div class="gain-row">
+        <input type="range" id="kiSlider" min="0" max="1" step="0.001" value="0">
+        <input type="number" id="kiNum" min="0" max="1" step="0.001" value="0">
+      </div>
+      <div class="desc">Reacts to accumulated past error. Add last, in small steps.</div>
+    </div>
+    <div class="gain">
+      <div class="gain-head"><label>Kd</label></div>
+      <div class="gain-row">
+        <input type="range" id="kdSlider" min="0" max="1" step="0.001" value="0">
+        <input type="number" id="kdNum" min="0" max="1" step="0.001" value="0">
+      </div>
+      <div class="desc">Reacts to how fast the tilt is changing. Add once Kp causes oscillation.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="statusText" class="desc">Not connected. Tap Connect, then choose "BalanceBot".</div>
+  </div>
+
+<script>
+(function(){
+  const SERVICE_UUID     = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  const CHAR_KP_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+  const CHAR_KI_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
+  const CHAR_KD_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
+  const CHAR_STATUS_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab";
+
+  const dot = document.getElementById('dot');
+  const connectBtn = document.getElementById('connectBtn');
+  const statusText = document.getElementById('statusText');
+  const thetaVal = document.getElementById('thetaVal');
+  const uVal = document.getElementById('uVal');
+
+  let device, server, kpChar, kiChar, kdChar, statusChar;
+
+  function setStatus(msg, connected){
+    statusText.textContent = msg;
+    dot.classList.toggle('on', !!connected);
+  }
+
+  function bindGain(sliderId, numId, getChar){
+    const slider = document.getElementById(sliderId);
+    const num = document.getElementById(numId);
+    let writeTimer = null;
+
+    function send(v){
+      const char = getChar();
+      if (!char) return;
+      const enc = new TextEncoder();
+      char.writeValueWithResponse(enc.encode(String(v))).catch(e=>setStatus('Write failed: '+e, true));
+    }
+    function onInput(v){
+      slider.value = v;
+      num.value = v;
+      clearTimeout(writeTimer);
+      writeTimer = setTimeout(()=>send(v), 60);
+    }
+    slider.oninput = ()=>onInput(slider.value);
+    num.oninput = ()=>onInput(num.value);
+  }
+
+  bindGain('kpSlider','kpNum', ()=>kpChar);
+  bindGain('kiSlider','kiNum', ()=>kiChar);
+  bindGain('kdSlider','kdNum', ()=>kdChar);
+
+  async function readGainInto(char, sliderId, numId){
+    try{
+      const v = await char.readValue();
+      const text = new TextDecoder().decode(v);
+      const num = parseFloat(text);
+      if (!isNaN(num)){
+        document.getElementById(sliderId).value = num;
+        document.getElementById(numId).value = num;
+      }
+    }catch(e){ /* some library versions don't support reading a write characteristic; safe to ignore */ }
+  }
+
+  function makeChart(canvasId){
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    function resize(){
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    return { canvas, ctx };
+  }
+
+  const thetaChart = makeChart('thetaChart');
+  const uChart = makeChart('uChart');
+
+  const WINDOW_MS = 10000;
+  let samples = [];
+
+  function drawSeries(chart, points, opts){
+    const {ctx, canvas} = chart;
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0,0,w,h);
+
+    const now = performance.now();
+    const tMin = now - WINDOW_MS, tMax = now;
+
+    let yMin, yMax;
+    if (opts.fixedMin !== undefined){
+      yMin = opts.fixedMin; yMax = opts.fixedMax;
+    } else {
+      const ys = points.map(p=>p.y);
+      let lo = ys.length ? Math.min(...ys) : -1;
+      let hi = ys.length ? Math.max(...ys) : 1;
+      if (opts.targetLine !== undefined){ lo = Math.min(lo, opts.targetLine); hi = Math.max(hi, opts.targetLine); }
+      const span = Math.max(hi - lo, opts.minRange || 1);
+      const mid = (hi + lo) / 2;
+      lo = mid - span/2*1.2;
+      hi = mid + span/2*1.2;
+      yMin = lo; yMax = hi;
+    }
+
+    function xAt(t){ return ((t - tMin) / (tMax - tMin)) * w; }
+    function yAt(y){ return h - ((y - yMin) / (yMax - yMin)) * h; }
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for (let i=1;i<4;i++){
+      const gy = (h/4)*i;
+      ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(w,gy); ctx.stroke();
+    }
+
+    if (opts.targetLine !== undefined){
+      const gy = yAt(opts.targetLine);
+      ctx.strokeStyle = 'rgba(245,158,11,0.9)';
+      ctx.setLineDash([5,4]);
+      ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(w,gy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (points.length > 1){
+      ctx.strokeStyle = opts.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      points.forEach((p,i)=>{
+        const x = xAt(p.t), y = yAt(p.y);
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.font = '10px -apple-system,Segoe UI,Roboto,sans-serif';
+    ctx.fillText(yMax.toFixed(1)+opts.unit, 4, 10);
+    ctx.fillText(yMin.toFixed(1)+opts.unit, 4, h-4);
+  }
+
+  function draw(){
+    const now = performance.now();
+    samples = samples.filter(s => now - s.t < WINDOW_MS);
+
+    drawSeries(thetaChart, samples.map(s=>({t:s.t, y:s.theta})), {
+      targetLine: 0, minRange: 10, unit: '°', color: '#4da3ff'
+    });
+    drawSeries(uChart, samples.map(s=>({t:s.t, y:s.u})), {
+      fixedMin: -1, fixedMax: 1, unit: '', color: '#22c55e'
+    });
+
+    if (samples.length){
+      const last = samples[samples.length-1];
+      thetaVal.textContent = last.theta.toFixed(1);
+      uVal.textContent = last.u.toFixed(2);
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  function onStatusNotify(event){
+    const text = new TextDecoder().decode(event.target.value);
+    const parts = text.split(',');
+    if (parts.length >= 2){
+      const theta = parseFloat(parts[0]);
+      const u = parseFloat(parts[1]);
+      if (!isNaN(theta) && !isNaN(u)){
+        samples.push({t: performance.now(), theta, u});
+      }
+    }
+  }
+
+  connectBtn.addEventListener('click', async ()=>{
+    if (!navigator.bluetooth){
+      setStatus('This browser has no Web Bluetooth support. Use Chrome on Android.', false);
+      return;
+    }
+    try{
+      setStatus('Scanning for BalanceBot...', false);
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'BalanceBot' }],
+        optionalServices: [SERVICE_UUID]
+      });
+      device.addEventListener('gattserverdisconnected', ()=> setStatus('Disconnected.', false));
+
+      setStatus('Connecting...', false);
+      server = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+
+      kpChar = await service.getCharacteristic(CHAR_KP_UUID);
+      kiChar = await service.getCharacteristic(CHAR_KI_UUID);
+      kdChar = await service.getCharacteristic(CHAR_KD_UUID);
+      statusChar = await service.getCharacteristic(CHAR_STATUS_UUID);
+
+      await readGainInto(kpChar, 'kpSlider', 'kpNum');
+      await readGainInto(kiChar, 'kiSlider', 'kiNum');
+      await readGainInto(kdChar, 'kdSlider', 'kdNum');
+
+      await statusChar.startNotifications();
+      statusChar.addEventListener('characteristicvaluechanged', onStatusNotify);
+
+      setStatus('Connected to ' + device.name, true);
+    }catch(e){
+      setStatus('Connection failed: ' + e, false);
+    }
+  });
+})();
+</script>
+</body>
+</html>
