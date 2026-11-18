@@ -31,9 +31,11 @@
   input[type=number]{width:80px; background:var(--panel2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px; font-size:14px;}
   .desc{font-size:12px; color:var(--muted); margin-top:4px;}
   canvas{width:100%; display:block; background:var(--panel2); border-radius:8px;}
-  .chart-title{font-size:12px; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between;}
+  .chart-title{font-size:12px; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;}
   .controls-row{display:flex; gap:10px; margin-bottom:10px;}
   .controls-row button{flex:1;}
+  #logPanel{height:140px; overflow-y:auto; background:var(--panel2); border-radius:8px; padding:8px; font-size:11px; margin:0; white-space:pre-wrap; font-family:monospace;}
+  .clearBtn{padding:4px 10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); color:var(--muted);}
   @media (prefers-color-scheme: light){
     :root{ --bg:#f4f6f9; --panel:#ffffff; --panel2:#f0f2f6; --border:#e2e6ec; --text:#101722; --muted:#5b6778; }
   }
@@ -85,6 +87,14 @@
       </div>
       <div class="desc">Reacts to how fast the tilt is changing. Add once Kp causes oscillation.</div>
     </div>
+    <div class="gain">
+      <div class="gain-head"><label>Setpoint offset (deg)</label></div>
+      <div class="gain-row">
+        <input type="range" id="setpointSlider" min="-15" max="15" step="0.1" value="0">
+        <input type="number" id="setpointNum" min="-15" max="15" step="0.1" value="0">
+      </div>
+      <div class="desc">Hold the robot by hand at true vertical, read the Tilt number above, and set this to match it. Removes a one-sided lean.</div>
+    </div>
   </div>
 
   <div class="card">
@@ -95,46 +105,67 @@
     <div id="statusText" class="desc">Not connected. Tap Connect, then choose "BalanceBot".</div>
   </div>
 
+  <div class="card">
+    <div class="chart-title"><span>Debug log</span><button class="clearBtn" id="clearLogBtn">Clear</button></div>
+    <pre id="logPanel"></pre>
+  </div>
+
 <script>
 (function(){
-  const SERVICE_UUID     = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-  const CHAR_KP_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-  const CHAR_KI_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
-  const CHAR_KD_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
-  const CHAR_STATUS_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab";
-  const CHAR_STOP_UUID   = "beb5483e-36e1-4688-b7f5-ea07361b26ac";
-  const CHAR_RESET_UUID  = "beb5483e-36e1-4688-b7f5-ea07361b26ad";
+  const SERVICE_UUID       = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  const CHAR_KP_UUID       = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+  const CHAR_KI_UUID       = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
+  const CHAR_KD_UUID       = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
+  const CHAR_STATUS_UUID   = "beb5483e-36e1-4688-b7f5-ea07361b26ab";
+  const CHAR_STOP_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26ac";
+  const CHAR_RESET_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26ad";
+  const CHAR_SETPOINT_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ae";
 
   const dot = document.getElementById('dot');
   const connectBtn = document.getElementById('connectBtn');
   const stopBtn = document.getElementById('stopBtn');
   const resetBtn = document.getElementById('resetBtn');
+  const clearLogBtn = document.getElementById('clearLogBtn');
   const statusText = document.getElementById('statusText');
   const thetaVal = document.getElementById('thetaVal');
   const uVal = document.getElementById('uVal');
+  const logPanel = document.getElementById('logPanel');
 
-  let device, server, kpChar, kiChar, kdChar, statusChar, stopChar, resetChar;
+  let device, server;
+  let kpChar, kiChar, kdChar, statusChar, stopChar, resetChar, setpointChar;
   let isStopped = false;
+  let gotFirstStatus = false;
+
+  function log(msg){
+    const t = new Date().toLocaleTimeString();
+    logPanel.textContent += `[${t}] ${msg}\n`;
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+  clearLogBtn.addEventListener('click', ()=>{ logPanel.textContent = ''; });
 
   function setStatus(msg, connected){
     statusText.textContent = msg;
     dot.classList.toggle('on', !!connected);
   }
 
-  function bindGain(sliderId, numId, getChar){
+  // identity transforms by default; setpoint overrides these with deg<->rad conversion
+  function bindGain(sliderId, numId, getChar, toDevice, fromDevice){
+    toDevice = toDevice || (v=>v);
     const slider = document.getElementById(sliderId);
     const num = document.getElementById(numId);
     let writeTimer = null;
 
     function send(v){
       const char = getChar();
-      if (!char) return;
+      if (!char) { log(sliderId + ': no characteristic (not connected?)'); return; }
+      const deviceVal = toDevice(parseFloat(v));
       const enc = new TextEncoder();
-      char.writeValueWithResponse(enc.encode(String(v))).catch(e=>setStatus('Write failed: '+e, true));
+      char.writeValueWithResponse(enc.encode(String(deviceVal)))
+        .then(()=>log(sliderId + ' -> ' + deviceVal))
+        .catch(e=>{ log(sliderId + ' write FAILED: ' + e); setStatus('Write failed: '+e, true); });
     }
     function onInput(v){
-      slider.value = v;
-      num.value = v;
+      slider.value = v; num.value = v;
       clearTimeout(writeTimer);
       writeTimer = setTimeout(()=>send(v), 60);
     }
@@ -145,37 +176,54 @@
   bindGain('kpSlider','kpNum', ()=>kpChar);
   bindGain('kiSlider','kiNum', ()=>kiChar);
   bindGain('kdSlider','kdNum', ()=>kdChar);
+  bindGain('setpointSlider','setpointNum', ()=>setpointChar, v=>v*Math.PI/180);
 
-  async function readGainInto(char, sliderId, numId){
+  async function readGainInto(char, sliderId, numId, fromDevice){
+    fromDevice = fromDevice || (v=>v);
     try{
       const v = await char.readValue();
       const text = new TextDecoder().decode(v);
-      const num = parseFloat(text);
-      if (!isNaN(num)){
-        document.getElementById(sliderId).value = num;
-        document.getElementById(numId).value = num;
+      const raw = parseFloat(text);
+      if (!isNaN(raw)){
+        const uiVal = fromDevice(raw);
+        document.getElementById(sliderId).value = uiVal;
+        document.getElementById(numId).value = uiVal;
+        log(sliderId + ' read as ' + uiVal);
       }
-    }catch(e){ /* some library versions don't support reading a write characteristic; safe to ignore */ }
+    }catch(e){ log(sliderId + ' read failed (ok to ignore): ' + e); }
+  }
+
+  async function getCharSafe(service, uuid, label){
+    try{
+      const c = await service.getCharacteristic(uuid);
+      log(label + ': characteristic found.');
+      return c;
+    }catch(e){
+      log(label + ': NOT FOUND - ' + e);
+      return null;
+    }
   }
 
   stopBtn.addEventListener('click', async ()=>{
-    if (!stopChar) return;
+    if (!stopChar){ log('Stop tapped but not connected to Stop characteristic.'); return; }
     isStopped = !isStopped;
     const enc = new TextEncoder();
     try{
       await stopChar.writeValueWithResponse(enc.encode(isStopped ? '1' : '0'));
       stopBtn.textContent = isStopped ? 'RESUME MOTORS' : 'STOP MOTORS';
       stopBtn.style.background = isStopped ? 'var(--accent2)' : 'var(--danger)';
-    }catch(e){ setStatus('Stop write failed: '+e, true); }
+      log('Stop set to ' + isStopped);
+    }catch(e){ setStatus('Stop write failed: '+e, true); log('Stop write failed: '+e); }
   });
 
   resetBtn.addEventListener('click', async ()=>{
-    if (!resetChar) return;
+    if (!resetChar){ log('Reset tapped but not connected to Reset characteristic.'); return; }
     const enc = new TextEncoder();
     try{
       await resetChar.writeValueWithResponse(enc.encode('1'));
       setStatus('Integral error reset.', true);
-    }catch(e){ setStatus('Reset write failed: '+e, true); }
+      log('Integral reset sent.');
+    }catch(e){ setStatus('Reset write failed: '+e, true); log('Reset write failed: '+e); }
   });
 
   function makeChart(canvasId){
@@ -280,6 +328,7 @@
 
   function onStatusNotify(event){
     const text = new TextDecoder().decode(event.target.value);
+    if (!gotFirstStatus){ log('First status packet received: ' + text); gotFirstStatus = true; }
     const parts = text.split(',');
     if (parts.length >= 2){
       const theta = parseFloat(parts[0]);
@@ -293,16 +342,22 @@
   connectBtn.addEventListener('click', async ()=>{
     if (!navigator.bluetooth){
       setStatus('This browser has no Web Bluetooth support. Use Chrome on Android.', false);
+      log('navigator.bluetooth is unavailable in this browser.');
       return;
     }
+    gotFirstStatus = false;
     try{
       setStatus('Scanning for BalanceBot...', false);
+      log('Requesting device...');
       device = await navigator.bluetooth.requestDevice({
         filters: [{ name: 'BalanceBot' }],
         optionalServices: [SERVICE_UUID]
       });
+      log('Device selected: ' + device.name);
+
       device.addEventListener('gattserverdisconnected', ()=>{
         setStatus('Disconnected.', false);
+        log('GATT disconnected.');
         isStopped = false;
         stopBtn.textContent = 'STOP MOTORS';
         stopBtn.style.background = 'var(--danger)';
@@ -310,25 +365,35 @@
 
       setStatus('Connecting...', false);
       server = await device.gatt.connect();
+      log('GATT connected.');
+
       const service = await server.getPrimaryService(SERVICE_UUID);
+      log('Service found.');
 
-      kpChar = await service.getCharacteristic(CHAR_KP_UUID);
-      kiChar = await service.getCharacteristic(CHAR_KI_UUID);
-      kdChar = await service.getCharacteristic(CHAR_KD_UUID);
-      statusChar = await service.getCharacteristic(CHAR_STATUS_UUID);
-      stopChar = await service.getCharacteristic(CHAR_STOP_UUID);
-      resetChar = await service.getCharacteristic(CHAR_RESET_UUID);
+      kpChar       = await getCharSafe(service, CHAR_KP_UUID, 'Kp');
+      kiChar       = await getCharSafe(service, CHAR_KI_UUID, 'Ki');
+      kdChar       = await getCharSafe(service, CHAR_KD_UUID, 'Kd');
+      setpointChar = await getCharSafe(service, CHAR_SETPOINT_UUID, 'Setpoint');
+      statusChar   = await getCharSafe(service, CHAR_STATUS_UUID, 'Status');
+      stopChar     = await getCharSafe(service, CHAR_STOP_UUID, 'Stop');
+      resetChar    = await getCharSafe(service, CHAR_RESET_UUID, 'Reset');
 
-      await readGainInto(kpChar, 'kpSlider', 'kpNum');
-      await readGainInto(kiChar, 'kiSlider', 'kiNum');
-      await readGainInto(kdChar, 'kdSlider', 'kdNum');
+      if (kpChar)       await readGainInto(kpChar, 'kpSlider', 'kpNum');
+      if (kiChar)       await readGainInto(kiChar, 'kiSlider', 'kiNum');
+      if (kdChar)       await readGainInto(kdChar, 'kdSlider', 'kdNum');
+      if (setpointChar) await readGainInto(setpointChar, 'setpointSlider', 'setpointNum', v=>v*180/Math.PI);
 
-      await statusChar.startNotifications();
-      statusChar.addEventListener('characteristicvaluechanged', onStatusNotify);
+      if (statusChar){
+        await statusChar.startNotifications();
+        statusChar.addEventListener('characteristicvaluechanged', onStatusNotify);
+        log('Status notifications enabled.');
+      }
 
       setStatus('Connected to ' + device.name, true);
+      log('Connect flow finished.');
     }catch(e){
       setStatus('Connection failed: ' + e, false);
+      log('Connect flow error: ' + e);
     }
   });
 })();
